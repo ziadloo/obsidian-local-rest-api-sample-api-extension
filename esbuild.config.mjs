@@ -31,12 +31,15 @@ const context = await esbuild.context({
 		"@lezer/common",
 		"@lezer/highlight",
 		"@lezer/lr",
+		"onnxruntime-node",
+		"onnxruntime-web",
+		"@huggingface/transformers",
 		...builtins],
 	format: "cjs",
-	target: "es2018",
+	target: "es2022",
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
-	treeShaking: true,
+	treeShaking: false,
 	outfile: "main.js",
 });
 

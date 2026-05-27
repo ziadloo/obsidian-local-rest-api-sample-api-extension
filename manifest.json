@@ -1,10 +1,9 @@
 {
-	"id": "obsidian-local-rest-api-sample-api-extension",
-	"name": "Local REST API Sample API Extension",
+	"id": "obsidian-local-rest-api-second-brain-api-extension",
+	"name": "Local REST API Second Brain API Extension",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Example of how you can add additional routes to Obsidian Local REST API via a plugin",
-	"author": "Obsidian",
-	"authorUrl": "https://coddingtonbear.net/",
+	"minAppVersion": "1.0.0",
+	"description": "Extension for Local REST API to add second brain MCP server",
+	"author": "Mehran",
 	"isDesktopOnly": true
 }
