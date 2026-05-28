@@ -27,3 +27,4 @@ models/
 *.onnx
 *.onnx_data
 
+embeddings-cache.json

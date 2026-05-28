@@ -6,12 +6,18 @@ interface SecondBrainPluginSettings {
 	modelName: string;
 	customModelName: string;
 	returnDiagnosticLogs: boolean;
+	wikiPurpose: string;
+	allowedPathPatterns: string[];
+	excludedPathPatterns: string[];
 }
 
 const DEFAULT_SETTINGS: SecondBrainPluginSettings = {
 	modelName: "Xenova/all-MiniLM-L6-v2",
 	customModelName: "",
-	returnDiagnosticLogs: false
+	returnDiagnosticLogs: false,
+	wikiPurpose: "",
+	allowedPathPatterns: ["^wiki/"],
+	excludedPathPatterns: ["^wiki/index\\.md$", "^wiki/log\\.md$"]
 };
 
 export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
@@ -66,6 +72,56 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	isPathAllowed(path: string): boolean {
+		const normalizedPath = path.replace(/\\/g, "/");
+		const normalizedPathLower = normalizedPath.toLowerCase();
+
+		// Check allowed patterns
+		let isAllowed = !this.settings.allowedPathPatterns || this.settings.allowedPathPatterns.length === 0;
+		if (this.settings.allowedPathPatterns) {
+			for (const pattern of this.settings.allowedPathPatterns) {
+				if (!pattern.trim()) continue;
+				try {
+					const regex = new RegExp(pattern, "i");
+					if (regex.test(normalizedPath)) {
+						isAllowed = true;
+						break;
+					}
+				} catch (e) {
+					// Fallback to case-insensitive substring match
+					if (normalizedPathLower.includes(pattern.toLowerCase())) {
+						isAllowed = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if (!isAllowed) {
+			return false;
+		}
+
+		// Check excluded patterns
+		if (this.settings.excludedPathPatterns) {
+			for (const pattern of this.settings.excludedPathPatterns) {
+				if (!pattern.trim()) continue;
+				try {
+					const regex = new RegExp(pattern, "i");
+					if (regex.test(normalizedPath)) {
+						return false;
+					}
+				} catch (e) {
+					// Fallback to case-insensitive substring match
+					if (normalizedPathLower.includes(pattern.toLowerCase())) {
+						return false;
+					}
+				}
+			}
+		}
+
+		return true;
 	}
 
 	registerRoutes() {
@@ -141,6 +197,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 						}
 
 						case "tools/list": {
+							const purposeSuffix = this.settings.wikiPurpose ? ` (specialized for: ${this.settings.wikiPurpose})` : "";
 							return response.status(200).json({
 								jsonrpc: "2.0",
 								id: id,
@@ -148,7 +205,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 									tools: [
 										{
 											name: "wiki_card",
-											description: "Retrieve the scope and capabilities of the knowledge contained in this MCP server.",
+											description: "Retrieve the scope and capabilities of the knowledge contained in this MCP server" + (purposeSuffix ? purposeSuffix + "." : "."),
 											inputSchema: {
 												type: "object",
 												properties: {}
@@ -156,7 +213,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 										},
 										{
 											name: "query_wiki",
-											description: "Query the second brain / wiki",
+											description: "Query the second brain / wiki" + purposeSuffix,
 											inputSchema: {
 												type: "object",
 												properties: {
@@ -164,13 +221,21 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 														type: "string",
 														description: "The search query to run against the wiki"
 													},
-													parent_limit: {
+													root_limit: {
 														type: "integer",
-														description: "Maximum number of files that should be included from the search (default: 5, -1 for unlimited)"
+														description: "Maximum number of root files that should be included from the search (default: 5, minimum: 1)"
 													},
-													child_limit: {
+													branch_factor: {
 														type: "integer",
-														description: "Maximum number of bidirectional connections to include per file (default: 2, -1 for unlimited)"
+														description: "Maximum number of connections to traverse per node, ranked by similarity to query (default: 2)"
+													},
+													depth_limit: {
+														type: "integer",
+														description: "Maximum BFS depth to traverse (0 = root nodes only, 1 = direct connections, etc., default: 2)"
+													},
+													total_limit: {
+														type: "integer",
+														description: "Strict cap on the total number of unique pages returned (default: 20)"
 													}
 												},
 												required: ["query"]
@@ -178,7 +243,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 										},
 										{
 											name: "get_wiki",
-											description: "Retrieve a specific wiki page by its path or filename.",
+											description: "Retrieve a specific wiki page by its path or filename" + (purposeSuffix ? purposeSuffix + "." : "."),
 											inputSchema: {
 												type: "object",
 												properties: {
@@ -368,8 +433,16 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 							// Otherwise, query_wiki
 							const query = params.arguments?.query;
-							const parent_limit = typeof params.arguments?.parent_limit === "number" ? params.arguments.parent_limit : 5;
-							const child_limit = typeof params.arguments?.child_limit === "number" ? params.arguments.child_limit : 2;
+							let root_limit = typeof params.arguments?.root_limit === "number" ? params.arguments.root_limit : 5;
+							let branch_factor = typeof params.arguments?.branch_factor === "number" ? params.arguments.branch_factor : 2;
+							let depth_limit = typeof params.arguments?.depth_limit === "number" ? params.arguments.depth_limit : 2;
+							let total_limit = typeof params.arguments?.total_limit === "number" ? params.arguments.total_limit : 20;
+
+							// Clamp limits per design specs
+							root_limit = Math.max(1, root_limit);
+							branch_factor = Math.max(0, branch_factor);
+							depth_limit = Math.max(0, depth_limit);
+							total_limit = Math.max(1, total_limit);
 
 							if (typeof query !== "string") {
 								return response.status(400).json({
@@ -392,7 +465,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 								debugLogs.push(msg);
 							};
 
-							logDebug(`[Second Brain MCP] Initiating query_wiki. Query: "${query}", parent_limit: ${parent_limit}, child_limit: ${child_limit}`);
+							logDebug(`[Second Brain MCP] Initiating query_wiki. Query: "${query}", root_limit: ${root_limit}, branch_factor: ${branch_factor}, depth_limit: ${depth_limit}, total_limit: ${total_limit}`);
 
 							// Ensure search engine is initialized
 							let searchEngineReady = false;
@@ -410,77 +483,100 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 							if (searchEngineReady) {
 								try {
 									queryEmbedding = await this.generateEmbedding(query);
-									logDebug(`[Second Brain MCP] Generated query embedding. Length: ${queryEmbedding.length}, HasNaNs: ${queryEmbedding.some(isNaN)}`);
+									logDebug(`[Second Brain MCP] Generated query embedding. Length: ${queryEmbedding.length}`);
 								} catch (err) {
 									logDebug(`[Second Brain MCP] Error generating query embedding: ${err}`, true);
 								}
 							}
 
-							const matchedParents: TFile[] = [];
+							const matchedRoots: TFile[] = [];
 
 							if (searchEngineReady && this.hnswIndex && queryEmbedding.length > 0) {
-								// HNSW vector search for parent nodes
-								const k = parent_limit === -1 ? this.embeddingCache.size : parent_limit;
-								logDebug(`[Second Brain MCP] Running HNSW vector search with k = ${k}`);
-								if (k > 0) {
-									const searchResults = this.hnswIndex.searchKNN(queryEmbedding, k);
-									logDebug(`[Second Brain MCP] HNSW raw search results (KNN count: ${searchResults.length}): ${JSON.stringify(searchResults)}`);
-									for (const res of searchResults) {
-										const path = this.idToPathMap.get(res.id);
-										logDebug(`[Second Brain MCP] HNSW Raw Match: id=${res.id}, dist=${res.dist}, path="${path}"`);
-										if (path) {
-											const file = this.app.vault.getAbstractFileByPath(path);
-											if (file instanceof TFile) {
-												matchedParents.push(file);
-											} else {
-												logDebug(`[Second Brain MCP] Path "${path}" is not a TFile.`);
-											}
+								// HNSW vector search for parent / root nodes
+								logDebug(`[Second Brain MCP] Running HNSW vector search with root_limit = ${root_limit}`);
+								const searchResults = this.hnswIndex.searchKNN(queryEmbedding, root_limit);
+								logDebug(`[Second Brain MCP] HNSW raw search results (count: ${searchResults.length}): ${JSON.stringify(searchResults)}`);
+								for (const res of searchResults) {
+									const path = this.idToPathMap.get(res.id);
+									if (path) {
+										const file = this.app.vault.getAbstractFileByPath(path);
+										if (file instanceof TFile) {
+											matchedRoots.push(file);
 										}
 									}
 								}
-								logDebug(`[Second Brain MCP] Semantic search matched ${matchedParents.length} parent nodes.`);
+								logDebug(`[Second Brain MCP] HNSW search matched ${matchedRoots.length} root nodes.`);
 							} else {
 								logDebug("[Second Brain MCP] HNSW Index or Query Embedding not ready, search returning 0 matches.", true);
 							}
 
-							interface SearchResultItem {
+							// Setup queue and tracker sets for BFS graph traversal
+							interface BFSNode {
+								file: TFile;
+								depth: number;
+							}
+
+							const queue: BFSNode[] = [];
+							const visited = new Set<string>();
+							const queued = new Set<string>();
+
+							// Push initial roots to queue
+							for (const file of matchedRoots) {
+								const normPath = file.path.replace(/\\/g, "/");
+								if (!queued.has(normPath)) {
+									queued.add(normPath);
+									queue.push({ file, depth: 0 });
+								}
+							}
+
+							// Final list of visited nodes to keep track of their path, content and child connections
+							interface TraversedItem {
 								path: string;
 								content: string;
 								connections: { path: string; content: string }[];
 							}
-							const matchedFiles: SearchResultItem[] = [];
+							const traversedItems: TraversedItem[] = [];
 
-							for (const file of matchedParents) {
-								const fileContent = await this.app.vault.cachedRead(file);
-								const parentPath = file.path;
+							// BFS Traversal Loop
+							while (queue.length > 0 && traversedItems.length < total_limit) {
+								const currentNode = queue.shift()!;
+								const normPath = currentNode.file.path.replace(/\\/g, "/");
 
-								// Gather bidirectional links for this file
+								if (visited.has(normPath)) {
+									continue;
+								}
+								visited.add(normPath);
+
+								let fileContent = "";
+								try {
+									fileContent = await this.app.vault.cachedRead(currentNode.file);
+								} catch (err) {
+									logDebug(`[Second Brain MCP] Failed to read file ${normPath}: ${err}`, true);
+									continue;
+								}
+
+								// Find bidirectional connections
 								const resolvedLinks = this.app.metadataCache.resolvedLinks;
 
 								// 1. Outgoing links
-								const outgoingPaths = Object.keys(resolvedLinks[parentPath] || {});
+								const outgoingPaths = Object.keys(resolvedLinks[currentNode.file.path] || {});
 
 								// 2. Incoming backlinks
 								const backlinkPaths: string[] = [];
 								for (const [sourcePath, destinations] of Object.entries(resolvedLinks)) {
-									if (destinations[parentPath]) {
+									if (destinations[currentNode.file.path]) {
 										backlinkPaths.push(sourcePath);
 									}
 								}
 
-								// 3. Unique set of connection paths
+								// Combine and filter unique valid connections
 								const uniqueConnPaths = Array.from(new Set([...outgoingPaths, ...backlinkPaths]));
-
-								// Filter connections to scope (must be in wiki/ and not index.md / log.md)
 								const validConnFiles: TFile[] = [];
 								for (const connPath of uniqueConnPaths) {
 									const normalizedConnPath = connPath.replace(/\\/g, "/");
 									const normalizedConnPathLower = normalizedConnPath.toLowerCase();
 
-									if (!normalizedConnPathLower.startsWith("wiki/")) {
-										continue;
-									}
-									if (normalizedConnPathLower === "wiki/index.md" || normalizedConnPathLower === "wiki/log.md") {
+									if (!this.isPathAllowed(connPath)) {
 										continue;
 									}
 
@@ -490,65 +586,75 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 									}
 								}
 
-								logDebug(`[Second Brain MCP] Parent document: "${parentPath}". Found ${uniqueConnPaths.length} unique connections, of which ${validConnFiles.length} are in-scope files.`);
-
-								// Apply semantic similarity ranking to children if child_limit !== -1
+								// Calculate semantic ranking for child connections if we have valid query embedding
 								let selectedConns: TFile[] = [];
-								if (child_limit === -1) {
-									logDebug(`[Second Brain MCP] child_limit is -1 (unlimited). Returning all ${validConnFiles.length} child connections without ranking.`);
-									selectedConns = validConnFiles;
-								} else if (searchEngineReady && queryEmbedding.length > 0) {
-									logDebug(`[Second Brain MCP] Calculating semantic similarity for child connections against query embedding.`);
-									const scoredConns = await Promise.all(
-										validConnFiles.map(async (connFile) => {
-											const normalizedConnPath = connFile.path.replace(/\\/g, "/");
-											let connEmbedding = this.embeddingCache.get(normalizedConnPath);
+								if (validConnFiles.length > 0) {
+									if (searchEngineReady && queryEmbedding.length > 0) {
+										const scoredConns = await Promise.all(
+											validConnFiles.map(async (connFile) => {
+												const normalizedConnPath = connFile.path.replace(/\\/g, "/");
+												let connEmbedding = this.embeddingCache.get(normalizedConnPath);
 
-											if (!connEmbedding) {
-												try {
-													const connContent = await this.app.vault.cachedRead(connFile);
-													const strippedConn = stripFrontmatter(connContent);
-													connEmbedding = await this.generateEmbedding(strippedConn);
-													this.embeddingCache.set(normalizedConnPath, connEmbedding);
-												} catch (err) {
-													connEmbedding = new Array(queryEmbedding.length).fill(0);
+												if (!connEmbedding) {
+													try {
+														const connContent = await this.app.vault.cachedRead(connFile);
+														const strippedConn = stripFrontmatter(connContent);
+														connEmbedding = await this.generateEmbedding(strippedConn);
+														this.embeddingCache.set(normalizedConnPath, connEmbedding);
+													} catch (err) {
+														connEmbedding = new Array(queryEmbedding.length).fill(0);
+													}
 												}
-											}
 
-											const score = dotProduct(queryEmbedding, connEmbedding!);
-											logDebug(`[Second Brain MCP] Connection Similarity: "${normalizedConnPath}" -> Score: ${score.toFixed(4)}`);
-											return { connFile, score };
-										})
-									);
+												const score = dotProduct(queryEmbedding, connEmbedding!);
+												return { connFile, score };
+											})
+										);
 
-									// Sort descending by score
-									scoredConns.sort((a, b) => b.score - a.score);
-									logDebug(`[Second Brain MCP] Sorted child connections: ${scoredConns.map(item => `${item.connFile.path} (${item.score.toFixed(4)})`).join(", ")}`);
-									selectedConns = scoredConns.slice(0, child_limit).map(item => item.connFile);
-								} else {
-									logDebug(`[Second Brain MCP] Bypassing semantic connection ranking (searchEngineReady=${searchEngineReady}, child_limit=${child_limit}). Selecting first ${child_limit} files.`);
-									selectedConns = validConnFiles.slice(0, child_limit);
+										// Sort descending by score
+										scoredConns.sort((a, b) => b.score - a.score);
+										selectedConns = scoredConns.slice(0, branch_factor).map(item => item.connFile);
+									} else {
+										selectedConns = validConnFiles.slice(0, branch_factor);
+									}
 								}
 
-								// Map selected connections to paths/contents
+								// Queue child connections for next depth level if within depth_limit
+								if (currentNode.depth < depth_limit) {
+									for (const childFile of selectedConns) {
+										const childNormPath = childFile.path.replace(/\\/g, "/");
+										if (!visited.has(childNormPath) && !queued.has(childNormPath)) {
+											queued.add(childNormPath);
+											queue.push({ file: childFile, depth: currentNode.depth + 1 });
+										}
+									}
+								}
+
+								// Map the immediate traversed connections content
 								const connections: { path: string; content: string }[] = [];
 								for (const connFile of selectedConns) {
-									const connContent = await this.app.vault.cachedRead(connFile);
-									connections.push({
-										path: connFile.path.replace(/\\/g, "/"),
-										content: connContent
-									});
+									try {
+										const connContent = await this.app.vault.cachedRead(connFile);
+										connections.push({
+											path: connFile.path.replace(/\\/g, "/"),
+											content: connContent
+										});
+									} catch (err) {
+										// Ignore read errors for connections
+									}
 								}
 
-								matchedFiles.push({
-									path: file.path.replace(/\\/g, "/"),
+								traversedItems.push({
+									path: normPath,
 									content: fileContent,
 									connections: connections
 								});
 							}
 
+							logDebug(`[Second Brain MCP] BFS Traversal complete. Total matched unique files: ${traversedItems.length}`);
+
 							let yamlResult = "";
-							for (const item of matchedFiles) {
+							for (const item of traversedItems) {
 								yamlResult += `- path: ${item.path}\n`;
 
 								const contentLines = item.content.split("\n");
@@ -797,10 +903,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 			const normalizedPath = file.path.replace(/\\/g, "/");
 			const normalizedPathLower = normalizedPath.toLowerCase();
 
-			if (!normalizedPathLower.startsWith("wiki/")) {
-				continue;
-			}
-			if (normalizedPathLower === "wiki/index.md" || normalizedPathLower === "wiki/log.md") {
+			if (!this.isPathAllowed(file.path)) {
 				continue;
 			}
 
@@ -884,10 +987,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 		const normalizedPath = file.path.replace(/\\/g, "/");
 		const normalizedPathLower = normalizedPath.toLowerCase();
 
-		if (!normalizedPathLower.startsWith("wiki/")) {
-			return;
-		}
-		if (normalizedPathLower === "wiki/index.md" || normalizedPathLower === "wiki/log.md") {
+		if (!this.isPathAllowed(file.path)) {
 			return;
 		}
 
@@ -1034,11 +1134,26 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl("h2", { text: "Second Brain MCP Settings" });
+		containerEl.createEl("h2", { text: "Second Brain MCP" });
+		containerEl.createEl("p", { text: "This is a plugin for the Obsidian Local REST API plugin (you could call it a meta-plugin). While it was originally developed to complement the \"Second Brain\" idea, it has grown beyond that scope and is now a general-purpose wiki-querying MCP server. It uses semantic search to find relevant notes and a BFS search of the graph to find connected notes." });
+		containerEl.createEl("h2", { text: "General Settings" });
+
+		new Setting(containerEl)
+			.setName("Wiki Purpose / Knowledge Domain")
+			.setDesc("A brief sentence or phrase describing the knowledge domain of this wiki (e.g. 'Software Engineering Knowledge Base'). This is dynamically injected into the MCP tool descriptions so the LLM knows what specific knowledge is hosted here.")
+			.addText((text) =>
+				text
+					.setPlaceholder("e.g. Software Engineering Knowledge Base")
+					.setValue(this.plugin.settings.wikiPurpose)
+					.onChange(async (value) => {
+						this.plugin.settings.wikiPurpose = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName("Embedding Model")
-			.setDesc("Select the local model used to generate embeddings.")
+			.setDesc("Select the local model used to generate embeddings for semantic search.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("Xenova/all-MiniLM-L6-v2", "all-MiniLM-L6-v2 (Light, 384 dim)")
@@ -1060,7 +1175,7 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Return Diagnostic Logs")
-			.setDesc("Include detailed execution logs in the tool response.")
+			.setDesc("Include detailed execution logs in the tool response (used for debugging).")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.returnDiagnosticLogs)
@@ -1093,11 +1208,147 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 				);
 		}
 
+		const pathSettingsWrapper = containerEl.createDiv();
+		pathSettingsWrapper.style.border = "1px solid var(--background-modifier-border)";
+		pathSettingsWrapper.style.borderRadius = "8px";
+		pathSettingsWrapper.style.padding = "18px";
+		pathSettingsWrapper.style.marginTop = "24px";
+		pathSettingsWrapper.style.marginBottom = "24px";
+		// pathSettingsWrapper.style.backgroundColor = "var(--background-secondary-alt)";
+
+		const pathFilteringHeader = pathSettingsWrapper.createEl("h2", { text: "Path & Filtering Settings" });
+		pathFilteringHeader.style.marginTop = "0";
+
+		const pathFilteringDesc = pathSettingsWrapper.createEl("p", {
+			text: "Configure regular expressions or prefixes to specify which notes are included or excluded from your search index."
+		});
+		pathFilteringDesc.style.fontSize = "0.9em";
+		pathFilteringDesc.style.color = "var(--text-muted)";
+		pathFilteringDesc.style.marginBottom = "16px";
+
+		const renderPatternList = (
+			container: HTMLElement,
+			title: string,
+			desc: string,
+			patternsList: string[],
+			placeholder: string,
+			saveCallback: () => Promise<void>
+		) => {
+			const titleEl = container.createEl("h3", { text: title });
+			titleEl.style.marginTop = "18px";
+			titleEl.style.marginBottom = "4px";
+
+			const descEl = container.createEl("p", { text: desc });
+			descEl.style.fontSize = "0.85em";
+			descEl.style.color = "var(--text-muted)";
+			descEl.style.marginBottom = "12px";
+			descEl.style.marginTop = "0";
+			descEl.style.display = "block";
+
+			const listWrapper = container.createDiv();
+			listWrapper.style.display = "flex";
+			listWrapper.style.flexDirection = "column";
+			listWrapper.style.gap = "8px";
+			listWrapper.style.marginBottom = "12px";
+			listWrapper.style.margin = "12px";
+
+			patternsList.forEach((pattern, index) => {
+				const row = listWrapper.createDiv();
+				row.style.display = "flex";
+				row.style.gap = "8px";
+				row.style.alignItems = "center";
+
+				const inputEl = row.createEl("input", {
+					type: "text",
+					value: pattern,
+					placeholder: placeholder
+				});
+				inputEl.style.flexGrow = "1";
+				inputEl.style.fontFamily = "var(--font-monospace)";
+				inputEl.style.minWidth = "0";
+
+				inputEl.addEventListener("change", async (e) => {
+					patternsList[index] = (e.target as HTMLInputElement).value.trim();
+					await saveCallback();
+				});
+
+				const removeBtn = row.createEl("button", {
+					text: "Remove"
+				});
+				removeBtn.style.cursor = "pointer";
+				removeBtn.addClass("mod-warning");
+				removeBtn.addEventListener("click", async () => {
+					patternsList.splice(index, 1);
+					await saveCallback();
+					this.display(); // Refresh Settings UI
+				});
+			});
+
+			const addRow = container.createDiv();
+			const addBtn = addRow.createEl("button", {
+				text: "+ Add Pattern"
+			});
+			addBtn.style.cursor = "pointer";
+			addBtn.addEventListener("click", async () => {
+				patternsList.push("");
+				await saveCallback();
+				this.display(); // Refresh Settings UI
+			});
+		};
+
+		renderPatternList(
+			pathSettingsWrapper,
+			"Allowed Path Patterns",
+			"Regular expressions matching paths that are ALLOWED to be indexed. Leave empty to allow all paths. (Default: '^wiki/')",
+			this.plugin.settings.allowedPathPatterns,
+			"e.g. ^wiki/",
+			async () => { await this.plugin.saveSettings(); }
+		);
+
+		renderPatternList(
+			pathSettingsWrapper,
+			"Excluded Path Patterns",
+			"Regular expressions matching paths that are EXCLUDED from the index. (Default: '^wiki/index\\.md$', '^wiki/log\\.md$')",
+			this.plugin.settings.excludedPathPatterns,
+			"e.g. ^wiki/index\\.md$",
+			async () => { await this.plugin.saveSettings(); }
+		);
+
+		const noteEl = pathSettingsWrapper.createEl("div", {
+			text: "Note: Changing these filters alters which files are indexed. To apply changes immediately, use the 'Clear Cache' button below to trigger a full re-index."
+		});
+		noteEl.style.marginTop = "14px";
+		noteEl.style.padding = "10px";
+		noteEl.style.borderLeft = "4px solid var(--interactive-accent)";
+		noteEl.style.backgroundColor = "var(--background-secondary)";
+		noteEl.style.fontSize = "0.85em";
+		noteEl.style.color = "var(--text-muted)";
+
+		const note2El = pathSettingsWrapper.createEl("div", {
+			text: "Note: The paths above are only for `query_wiki` and the `get_wiki` tool can return any document if the correct path is provided."
+		});
+		note2El.style.marginTop = "14px";
+		note2El.style.padding = "10px";
+		note2El.style.borderLeft = "4px solid var(--interactive-accent)";
+		note2El.style.backgroundColor = "var(--background-secondary)";
+		note2El.style.fontSize = "0.85em";
+		note2El.style.color = "var(--text-muted)";
+
+		const note3El = pathSettingsWrapper.createEl("div", {
+			text: "Note: For a document to be returned by the `query_wiki` tool, it must be included by the \"Allow Path Patterns\" and not excluded by the \"Exclude Path Patterns\"."
+		});
+		note3El.style.marginTop = "14px";
+		note3El.style.padding = "10px";
+		note3El.style.borderLeft = "4px solid var(--interactive-accent)";
+		note3El.style.backgroundColor = "var(--background-secondary)";
+		note3El.style.fontSize = "0.85em";
+		note3El.style.color = "var(--text-muted)";
+
 		containerEl.createEl("h3", { text: "Cache Management" });
 
 		new Setting(containerEl)
 			.setName("Clear Embeddings Cache")
-			.setDesc("Delete the stored embedding vectors from disk. The next semantic search query will re-index your files.")
+			.setDesc("Delete the stored embedding vectors from disk and re-index your files.")
 			.addButton((button) =>
 				button
 					.setButtonText("Clear Cache")
@@ -1115,6 +1366,31 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 							console.error("[Second Brain MCP] Failed to clear embeddings cache:", err);
 							new Notice("Failed to clear embeddings cache: " + err);
 						}
+					})
+			);
+
+		containerEl.createEl("h3", { text: "Reset Settings" });
+
+		new Setting(containerEl)
+			.setName("Restore Defaults")
+			.setDesc("Restore all settings to their original factory defaults. This will reset the embedding model, custom paths, wiki purpose, and path pattern filters.")
+			.addButton((button) =>
+				button
+					.setButtonText("Restore Defaults")
+					.setWarning()
+					.onClick(async () => {
+						this.plugin.settings = {
+							modelName: DEFAULT_SETTINGS.modelName,
+							customModelName: DEFAULT_SETTINGS.customModelName,
+							returnDiagnosticLogs: DEFAULT_SETTINGS.returnDiagnosticLogs,
+							wikiPurpose: DEFAULT_SETTINGS.wikiPurpose,
+							allowedPathPatterns: [...DEFAULT_SETTINGS.allowedPathPatterns],
+							excludedPathPatterns: [...DEFAULT_SETTINGS.excludedPathPatterns]
+						};
+						await this.plugin.saveSettings();
+						await this.plugin.reinitializeSearchEngine();
+						new Notice("Second Brain MCP settings successfully restored to defaults!");
+						this.display(); // Re-render settings tab UI to show default values immediately
 					})
 			);
 	}
