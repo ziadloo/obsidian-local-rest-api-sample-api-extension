@@ -24,6 +24,42 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 	private idToPathMap: Map<number, string> = new Map();
 	private initPromise: Promise<void> | null = null;
 
+	private resolvedPluginDir: string = "";
+
+	getPluginDirRelative(): string {
+		if (this.resolvedPluginDir) {
+			return this.resolvedPluginDir;
+		}
+		return `.obsidian/plugins/${this.manifest.id}`;
+	}
+
+	async resolvePluginDirectory() {
+		try {
+			const adapter = this.app.vault.adapter;
+			const listResult = await adapter.list(".obsidian/plugins");
+			for (const folder of listResult.folders) {
+				const manifestPath = `${folder}/manifest.json`;
+				if (await adapter.exists(manifestPath)) {
+					try {
+						const manifestContent = await adapter.read(manifestPath);
+						const manifest = JSON.parse(manifestContent);
+						if (manifest.id === this.manifest.id) {
+							this.resolvedPluginDir = folder.replace(/\\/g, "/");
+							console.log(`[Second Brain MCP] Successfully resolved plugin directory in vault: ${this.resolvedPluginDir}`);
+							return;
+						}
+					} catch (e) {
+						// Skip other plugins' manifest read/parse issues
+					}
+				}
+			}
+		} catch (err) {
+			console.error("[Second Brain MCP] Failed to auto-resolve plugin directory from vault adapter:", err);
+		}
+		// Fallback if anything goes wrong
+		this.resolvedPluginDir = `.obsidian/plugins/${this.manifest.id}`;
+	}
+
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
@@ -622,6 +658,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		await this.resolvePluginDirectory();
 
 		this.addSettingTab(new ObsidianLocalRESTAPISecondBrainSettingsTab(this.app, this));
 
@@ -697,7 +734,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 				const adapter = this.app.vault.adapter;
 				if (adapter instanceof FileSystemAdapter) {
 					const basePath = adapter.getBasePath();
-					tfModulePath = pathObj.join(basePath, ".obsidian", "plugins", this.manifest.id, "node_modules", "@huggingface/transformers");
+					tfModulePath = pathObj.join(basePath, this.getPluginDirRelative(), "node_modules", "@huggingface/transformers");
 				} else {
 					tfModulePath = "@huggingface/transformers";
 				}
@@ -885,7 +922,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 	}
 
 	async loadEmbeddingCache(): Promise<Record<string, { hash: string; vector: number[] }> | null> {
-		const cachePath = `.obsidian/plugins/${this.manifest.id}/embeddings-cache.json`;
+		const cachePath = `${this.getPluginDirRelative()}/embeddings-cache.json`;
 		const adapter = this.app.vault.adapter;
 
 		if (!(await adapter.exists(cachePath))) {
@@ -910,7 +947,7 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 	}
 
 	async saveEmbeddingCache() {
-		const cachePath = `.obsidian/plugins/${this.manifest.id}/embeddings-cache.json`;
+		const cachePath = `${this.getPluginDirRelative()}/embeddings-cache.json`;
 		const adapter = this.app.vault.adapter;
 
 		const modelToLoad = this.settings.modelName === "custom"
@@ -1066,7 +1103,7 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 					.setButtonText("Clear Cache")
 					.setWarning()
 					.onClick(async () => {
-						const cachePath = `.obsidian/plugins/${this.plugin.manifest.id}/embeddings-cache.json`;
+						const cachePath = `${this.plugin.getPluginDirRelative()}/embeddings-cache.json`;
 						const adapter = this.plugin.app.vault.adapter;
 						try {
 							if (await adapter.exists(cachePath)) {

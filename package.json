@@ -25,5 +25,8 @@
 	"dependencies": {
 		"@huggingface/transformers": "^4.2.0",
 		"hnsw": "^1.1.1"
+	},
+	"overrides": {
+		"sharp": "file:./dummy-sharp"
 	}
 }
