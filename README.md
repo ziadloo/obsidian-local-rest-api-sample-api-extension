@@ -29,3 +29,7 @@ This **Second Brain MCP Extension** builds on top of that infrastructure:
 2. Update `main.ts` to advertise your new route(s).
 3. Build the project with `npm run build` (or `npm run dev` if you are iterating on some changes).
 4. Link the plugin into your Obsidian vault's `.obsidian/plugins` directory.  On linux or osx, you can run `ln -s /path/to/your/cloned/fork /path/to/your/vault/.obsidian/plugins`.
+
+## Performance Notes
+
+Due to strict browser security constraints within Obsidian's Electron environment (specifically the disabling of `SharedArrayBuffer`), WebAssembly multi-threading is completely blocked. Furthermore, the Hugging Face WebGPU backend is currently unsupported or highly unstable in this context. Consequently, this plugin is forced to rely on a single CPU core for embedding generation to remain a safe, cross-platform Community Plugin. While the initial indexing of your vault may take some time, all generated embeddings are cached locally, ensuring that all subsequent queries are lightning fast.

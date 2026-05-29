@@ -5,6 +5,7 @@ import * as crypto from "crypto";
 interface SecondBrainPluginSettings {
 	modelName: string;
 	customModelName: string;
+	cachedModelName: string;
 	returnDiagnosticLogs: boolean;
 	wikiPurpose: string;
 	allowedPathPatterns: string[];
@@ -14,6 +15,7 @@ interface SecondBrainPluginSettings {
 const DEFAULT_SETTINGS: SecondBrainPluginSettings = {
 	modelName: "Xenova/all-MiniLM-L6-v2",
 	customModelName: "",
+	cachedModelName: "",
 	returnDiagnosticLogs: false,
 	wikiPurpose: "",
 	allowedPathPatterns: ["^wiki/"],
@@ -811,6 +813,8 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 		this.fileHashMap.clear();
 		this.idToPathMap.clear();
 		this.initPromise = null;
+		this.settings.cachedModelName = "";
+		await this.saveSettings();
 		await this.initializeSearchEngine();
 	}
 
@@ -823,9 +827,12 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 		this.initPromise = (async () => {
 			try {
-				const modelToLoad = this.settings.modelName === "custom"
-					? this.settings.customModelName
-					: this.settings.modelName;
+				let modelToLoad = this.settings.cachedModelName;
+				if (!modelToLoad) {
+					modelToLoad = this.settings.modelName === "custom"
+						? this.settings.customModelName
+						: this.settings.modelName;
+				}
 
 				if (!modelToLoad) {
 					localLog("[Second Brain MCP] No embedding model configured yet.");
@@ -868,6 +875,10 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 				// Pre-index all files
 				await this.indexAllFiles(logFn);
+
+				this.settings.cachedModelName = modelToLoad;
+				await this.saveSettings();
+
 				localLog("[Second Brain MCP] Search engine initialization complete.");
 			} catch (err) {
 				localLog(`[Second Brain MCP] Failed to initialize search engine: ${err}`, true);
@@ -1154,7 +1165,14 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl)
+		const modelSettingsWrapper = containerEl.createDiv();
+		modelSettingsWrapper.style.border = "1px solid var(--background-modifier-border)";
+		modelSettingsWrapper.style.borderRadius = "8px";
+		modelSettingsWrapper.style.padding = "18px";
+		modelSettingsWrapper.style.marginTop = "24px";
+		modelSettingsWrapper.style.marginBottom = "24px";
+
+		new Setting(modelSettingsWrapper)
 			.setName("Embedding Model")
 			.setDesc("Select the local model used to generate embeddings for semantic search.")
 			.addDropdown((dropdown) =>
@@ -1165,16 +1183,50 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 					.addOption("custom", "Custom Model Path (Specify Below)")
 					.setValue(this.plugin.settings.modelName)
 					.onChange(async (value) => {
-						const prevModel = this.plugin.settings.modelName;
 						this.plugin.settings.modelName = value;
 						await this.plugin.saveSettings();
 						this.display(); // re-render to toggle custom path field visibility
-
-						if (prevModel !== value && value !== "custom") {
-							await this.plugin.reinitializeSearchEngine();
-						}
 					})
 			);
+
+		if (this.plugin.settings.modelName === "custom") {
+			new Setting(modelSettingsWrapper)
+				.setName("Custom Model Path")
+				.setDesc("Enter the Hugging Face model path (e.g. Xenova/all-MiniLM-L6-v2).")
+				.addText((text) =>
+					text
+						.setPlaceholder("Enter model path")
+						.setValue(this.plugin.settings.customModelName)
+						.onChange(async (value) => {
+							this.plugin.settings.customModelName = value.trim();
+						})
+				)
+				.addButton((button) =>
+					button
+						.setButtonText("Apply")
+						.setCta()
+						.onClick(async () => {
+							await this.plugin.saveSettings();
+							this.display();
+						})
+				);
+		}
+
+		const currentModelToLoad = this.plugin.settings.modelName === "custom" ? this.plugin.settings.customModelName : this.plugin.settings.modelName;
+		if (this.plugin.settings.cachedModelName && currentModelToLoad && currentModelToLoad !== this.plugin.settings.cachedModelName) {
+			const warningNote = modelSettingsWrapper.createEl("div", {
+				text: "Warning: The selected model is different from the one currently running and cached. You must click 'Clear Cache' below to apply your new model selection."
+			});
+			warningNote.style.lineHeight = '2';
+			warningNote.style.textWrap = 'pretty';
+			warningNote.style.backgroundColor = "var(--background-secondary-alt)";
+			warningNote.style.border = "1px solid var(--text-error)";
+			warningNote.style.borderRadius = "8px";
+			warningNote.style.padding = "18px";
+			warningNote.style.marginTop = "24px";
+			warningNote.style.marginBottom = "24px";
+			warningNote.style.color = "var(--text-error)";
+		}
 
 		new Setting(containerEl)
 			.setName("Return Diagnostic Logs")
@@ -1261,29 +1313,6 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 				const port = parentSettings.insecurePort || 27123;
 				renderConfigCodeBlock("MCP Configuration (Non-encrypted / HTTP)", `http://127.0.0.1:${port}/second-brain-mcp/`);
 			}
-		}
-
-		if (this.plugin.settings.modelName === "custom") {
-			new Setting(containerEl)
-				.setName("Custom Model Path")
-				.setDesc("Enter the Hugging Face model path (e.g. Xenova/all-MiniLM-L6-v2).")
-				.addText((text) =>
-					text
-						.setPlaceholder("Enter model path")
-						.setValue(this.plugin.settings.customModelName)
-						.onChange(async (value) => {
-							this.plugin.settings.customModelName = value.trim();
-						})
-				)
-				.addButton((button) =>
-					button
-						.setButtonText("Apply & Reload")
-						.setCta()
-						.onClick(async () => {
-							await this.plugin.saveSettings();
-							await this.plugin.reinitializeSearchEngine();
-						})
-				);
 		}
 
 		const pathSettingsWrapper = containerEl.createDiv();
@@ -1423,6 +1452,17 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 
 		containerEl.createEl("h3", { text: "Cache Management" });
 
+		const perfNote = containerEl.createEl("div", {
+			text: "Note: Due to browser security constraints in Obsidian, local embedding generation is limited to a single CPU core. Initial indexing or re-indexing may be slow, but subsequent cached queries will be very fast."
+		});
+		perfNote.style.marginTop = "14px";
+		perfNote.style.marginBottom = "14px";
+		perfNote.style.padding = "10px";
+		perfNote.style.borderLeft = "4px solid var(--interactive-accent)";
+		perfNote.style.backgroundColor = "var(--background-secondary)";
+		perfNote.style.fontSize = "0.85em";
+		perfNote.style.color = "var(--text-muted)";
+
 		new Setting(containerEl)
 			.setDesc("Delete the stored embedding vectors from disk and re-index your files.")
 			.addButton((button) =>
@@ -1457,6 +1497,7 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 						this.plugin.settings = {
 							modelName: DEFAULT_SETTINGS.modelName,
 							customModelName: DEFAULT_SETTINGS.customModelName,
+							cachedModelName: DEFAULT_SETTINGS.cachedModelName,
 							returnDiagnosticLogs: DEFAULT_SETTINGS.returnDiagnosticLogs,
 							wikiPurpose: DEFAULT_SETTINGS.wikiPurpose,
 							allowedPathPatterns: [...DEFAULT_SETTINGS.allowedPathPatterns],
