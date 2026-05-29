@@ -834,18 +834,8 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 
 				localLog(`[Second Brain MCP] Initializing search engine with model: ${modelToLoad}`);
 
-				// Load @huggingface/transformers using Node's require with an absolute path resolved from vault
-				const pathObj = require("path");
-				let tfModulePath = "";
-				const adapter = this.app.vault.adapter;
-				if (adapter instanceof FileSystemAdapter) {
-					const basePath = adapter.getBasePath();
-					tfModulePath = pathObj.join(basePath, this.getPluginDirRelative(), "node_modules", "@huggingface/transformers");
-				} else {
-					tfModulePath = "@huggingface/transformers";
-				}
-				localLog(`[Second Brain MCP] Requiring @huggingface/transformers from absolute path: ${tfModulePath}`);
-				const tfModule = require(tfModulePath);
+				localLog(`[Second Brain MCP] Requiring @huggingface/transformers`);
+				const tfModule = require("@huggingface/transformers");
 				localLog(`[Second Brain MCP] tfModule keys: ${Object.keys(tfModule).join(", ")}`);
 
 				const pipeline = tfModule.pipeline || (tfModule as any).default?.pipeline;
@@ -860,7 +850,8 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 						// Configure env to disable local filesystem models
 						env.allowLocalModels = false;
 						if (env.backends?.onnx?.wasm) {
-							env.backends.onnx.wasm.numThreads = 1;
+							// Let ONNX Runtime use its default multi-threading behavior
+							// env.backends.onnx.wasm.numThreads = 1;
 						}
 						localLog("[Second Brain MCP] Transformers env successfully configured.");
 					} catch (envErr) {
@@ -870,8 +861,9 @@ export default class ObsidianLocalRESTAPISecondBrainPlugin extends Plugin {
 					localLog("[Second Brain MCP] Warning: 'env' object not found in @huggingface/transformers module, skipping environment override.", true);
 				}
 
-				// Load feature-extraction pipeline
-				this.extractor = await pipeline("feature-extraction", modelToLoad);
+				// Load feature-extraction pipeline (forced to CPU due to WebGPU unavailability and caching bugs)
+				localLog(`[Second Brain MCP] Initializing pipeline on CPU...`);
+				this.extractor = await pipeline("feature-extraction", modelToLoad, { device: "cpu" });
 				localLog("[Second Brain MCP] Transformer model loaded successfully.");
 
 				// Pre-index all files

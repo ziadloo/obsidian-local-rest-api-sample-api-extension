@@ -17,6 +17,9 @@ const context = await esbuild.context({
 	},
 	entryPoints: ["main.ts"],
 	bundle: true,
+	alias: {
+		"onnxruntime-node": "onnxruntime-web"
+	},
 	external: [
 		"obsidian",
 		"electron",
@@ -34,6 +37,7 @@ const context = await esbuild.context({
 		...builtins],
 	format: "cjs",
 	target: "es2022",
+	platform: "node",
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: false,
