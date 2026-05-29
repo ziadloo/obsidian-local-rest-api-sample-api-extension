@@ -1,9 +1,9 @@
 {
-	"id": "obsidian-local-rest-api-second-brain-api-extension",
+	"id": "obsidian-local-rest-api-second-brain-mcp-extension",
 	"name": "Local REST API Second Brain MCP Extension",
-	"version": "1.0.0",
-	"minAppVersion": "1.0.0",
+	"version": "1.0.1",
+	"minAppVersion": "1.0.1",
 	"description": "Extension for Local REST API to add second brain MCP server",
-	"author": "Mehran",
+	"author": "Mehran Ziadloo",
 	"isDesktopOnly": true
 }
