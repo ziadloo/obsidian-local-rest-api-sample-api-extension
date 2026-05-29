@@ -1135,7 +1135,17 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		containerEl.createEl("h2", { text: "Second Brain MCP" });
-		containerEl.createEl("p", { text: "This is a plugin for the Obsidian Local REST API plugin (you could call it a meta-plugin). While it was originally developed to complement the \"Second Brain\" idea, it has grown beyond that scope and is now a general-purpose wiki-querying MCP server. It uses semantic search to find relevant notes and a BFS search of the graph to find connected notes." });
+		const desc = containerEl.createEl("p", { text: "This is a plugin for the Obsidian Local REST API plugin (you could call it a meta-plugin). While it was originally developed to complement the \"Second Brain\" idea, it has grown beyond that scope and is now a general-purpose wiki-querying MCP server. It uses semantic search to find relevant notes and a BFS search of the graph to find connected notes." });
+		desc.style.lineHeight = '2';
+		desc.style.textWrap = 'pretty';
+		desc.style.backgroundColor = "var(--background-secondary-alt)";
+		desc.style.border = "1px solid var(--background-modifier-border)";
+		desc.style.borderRadius = "8px";
+		desc.style.padding = "18px";
+		desc.style.marginTop = "24px";
+		desc.style.marginBottom = "24px";
+
+
 		containerEl.createEl("h2", { text: "General Settings" });
 
 		new Setting(containerEl)
@@ -1147,6 +1157,7 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.wikiPurpose)
 					.onChange(async (value) => {
 						this.plugin.settings.wikiPurpose = value.trim();
+						configUpdaters.forEach(updater => updater());
 						await this.plugin.saveSettings();
 					})
 			);
@@ -1185,6 +1196,81 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 					})
 			);
 
+		const configUpdaters: (() => void)[] = [];
+
+		const parentPlugin = (this.app as any).plugins.plugins["obsidian-local-rest-api"];
+		if (parentPlugin && parentPlugin.settings) {
+			const parentSettings = parentPlugin.settings;
+			const authHeaderName = parentSettings.authorizationHeaderName || "Authorization";
+			const apiKey = parentSettings.apiKey || "API_KEY_NOT_FOUND";
+
+			const createConfigJson = (url: string, currentWikiPurpose: string) => {
+				let mcpKey = currentWikiPurpose.trim();
+				if (!mcpKey) {
+					mcpKey = "Obsidian MCP";
+				}
+
+				return JSON.stringify({
+					mcpServers: {
+						[mcpKey]: {
+							url: url,
+							transport: "http",
+							headers: {
+								[authHeaderName]: `Bearer ${apiKey}`
+							}
+						}
+					}
+				}, null, 2);
+			};
+
+			const renderConfigCodeBlock = (title: string, url: string) => {
+				containerEl.createEl("h3", { text: title });
+				let currentConfigStr = createConfigJson(url, this.plugin.settings.wikiPurpose);
+
+				const wrapper = containerEl.createDiv();
+				wrapper.style.position = "relative";
+				wrapper.style.marginBottom = "24px";
+				wrapper.style.backgroundColor = "var(--background-secondary)";
+				wrapper.style.border = "1px solid var(--background-modifier-border)";
+				wrapper.style.borderRadius = "8px";
+				wrapper.style.padding = "16px";
+				wrapper.style.paddingTop = "36px"; // Extra padding for copy button
+
+				const pre = wrapper.createEl("pre");
+				pre.style.margin = "0";
+				pre.style.whiteSpace = "pre-wrap";
+				const code = pre.createEl("code", { text: currentConfigStr });
+				code.style.fontFamily = "var(--font-monospace)";
+				code.style.fontSize = "0.9em";
+				code.style.userSelect = "all";
+
+				const copyBtn = wrapper.createEl("button", { text: "Copy" });
+				copyBtn.style.position = "absolute";
+				copyBtn.style.top = "8px";
+				copyBtn.style.right = "8px";
+				copyBtn.addEventListener("click", async () => {
+					await navigator.clipboard.writeText(currentConfigStr);
+					copyBtn.innerText = "Copied!";
+					setTimeout(() => { copyBtn.innerText = "Copy"; }, 2000);
+				});
+
+				configUpdaters.push(() => {
+					currentConfigStr = createConfigJson(url, this.plugin.settings.wikiPurpose);
+					code.innerText = currentConfigStr;
+				});
+			};
+
+			if (parentSettings.enableSecureServer !== false) {
+				const port = parentSettings.port || 27124;
+				renderConfigCodeBlock("MCP Configuration (Encrypted / HTTPS)", `https://127.0.0.1:${port}/second-brain-mcp/`);
+			}
+
+			if (parentSettings.enableInsecureServer) {
+				const port = parentSettings.insecurePort || 27123;
+				renderConfigCodeBlock("MCP Configuration (Non-encrypted / HTTP)", `http://127.0.0.1:${port}/second-brain-mcp/`);
+			}
+		}
+
 		if (this.plugin.settings.modelName === "custom") {
 			new Setting(containerEl)
 				.setName("Custom Model Path")
@@ -1214,7 +1300,6 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 		pathSettingsWrapper.style.padding = "18px";
 		pathSettingsWrapper.style.marginTop = "24px";
 		pathSettingsWrapper.style.marginBottom = "24px";
-		// pathSettingsWrapper.style.backgroundColor = "var(--background-secondary-alt)";
 
 		const pathFilteringHeader = pathSettingsWrapper.createEl("h2", { text: "Path & Filtering Settings" });
 		pathFilteringHeader.style.marginTop = "0";
@@ -1347,7 +1432,6 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Cache Management" });
 
 		new Setting(containerEl)
-			.setName("Clear Embeddings Cache")
 			.setDesc("Delete the stored embedding vectors from disk and re-index your files.")
 			.addButton((button) =>
 				button
@@ -1372,7 +1456,6 @@ class ObsidianLocalRESTAPISecondBrainSettingsTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Reset Settings" });
 
 		new Setting(containerEl)
-			.setName("Restore Defaults")
 			.setDesc("Restore all settings to their original factory defaults. This will reset the embedding model, custom paths, wiki purpose, and path pattern filters.")
 			.addButton((button) =>
 				button

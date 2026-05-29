@@ -1,9 +1,9 @@
-# Obsidian Local REST API Second Brain API Extension
+# Obsidian Local REST API Second Brain MCP Extension
 
 This plugin provides an example of how you might add additional plugins to
 Obsidian Local REST API.
 
-## Instructions
+## Manual Installation
 
 1. Fork this repository.
 2. Update `main.ts` to advertise your new route(s).
