@@ -1,0 +1,38 @@
+name: Release Obsidian plugin
+
+on:
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - "*" # Push events to any matching tag (e.g. 1.0.2)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Build plugin
+        run: |
+          npm install
+          npm run build
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag_name" \
+            --title="$tag_name" \
+            --draft=false \
+            --prerelease=false \
+            main.js manifest.json styles.css
